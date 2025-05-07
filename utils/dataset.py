@@ -96,10 +96,12 @@ class ShapeNetAD(Dataset):
         
         return pc, shift, scale
 
-    def append(self, pc, cate, pc_id, mask, label):
+    def append(self, pc, pc_raw, cate, pc_id, mask, label):
         pc, shift, scale = self.scale(pc)
+        pc_raw, _, _ = self.scale(pc_raw)
         self.pointclouds.append({
-            'pointcloud': pc,
+            'pointcloud': pc,  # augmented version
+            'pointcloud_raw': pc_raw,  # original before any patching or masking
             'cate': cate,
             'id': pc_id,
             'shift': shift,
@@ -128,8 +130,19 @@ class ShapeNetAD(Dataset):
                     choice = np.random.choice(len(pointcloud), self.num_points, False)
                     pc = torch.from_numpy(pointcloud[choice])
                     mask = torch.zeros(self.num_points)
-                    label = 0
-                    self.append(pc, cate, pc_id, mask, label)
+                    if random.random() < 0.5:
+                        patch_num = random.uniform(len(pointcloud) // 4, len(pointcloud) // 32)
+                        patch_scale = random.uniform(0.0, 0.2)
+                        pointcloud_aug, mask_aug = random_patch(pointcloud, int(patch_num), patch_scale)
+                        choice = np.random.choice(len(pointcloud_aug), self.num_points, False)
+                        pc_aug = torch.from_numpy(pointcloud_aug[choice])
+                        mask = torch.from_numpy(mask_aug[choice])
+                        label = 1
+                        self.append(pc_aug, pc, cate, pc_id, mask, label)
+                    else:
+                        mask = torch.zeros(self.num_points)
+                        label = 0
+                        self.append(pc, pc, cate, pc_id, mask, label)
 
             elif self.split == 'test':
                 local_path = os.path.join(self.path, cate, 'test')
@@ -149,7 +162,7 @@ class ShapeNetAD(Dataset):
                         pc = torch.from_numpy(pointcloud_mask[choice, :3])
                         mask = torch.from_numpy(pointcloud_mask[choice, 3])
                         label = 1
-                    self.append(pc, cate, pc_id, mask, label)
+                    self.append(pc, pc, cate, pc_id, mask, label)
 
         # Deterministically shuffle the dataset
         self.pointclouds.sort(key=lambda data: data['id'], reverse=False)

@@ -20,13 +20,14 @@ def main(args):
         raise NotImplementedError
     
     for cate in cates:
-        cmd = f"python train_ae.py --category {cate} --log_root logs_{dataset}/{exp_name}_{time_fix}_{args.tag}/" + cfg_cmd
+        cmd = f"python train_ae.py --category {cate} --log_root logs_{dataset}/{exp_name}_{time_fix}_{args.tag}/ --model_type {args.model_type}" + cfg_cmd
         os.system(cmd)
-        break
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("config")
     parser.add_argument('--tag', type=str, default='')
+    parser.add_argument('--model_type', type=str, default='default', choices=['default', 'dit'], 
+                      help='Model type: default (original R3D-AD) or dit (with DiT transformer)')
     args = parser.parse_args()
     main(args)
