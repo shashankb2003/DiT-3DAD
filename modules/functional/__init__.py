@@ -1,0 +1,2 @@
+from modules.functional.devoxelization import trilinear_devoxelize
+from modules.functional.voxelization import avg_voxelize
