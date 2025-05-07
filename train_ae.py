@@ -18,6 +18,7 @@ from evaluation import ROC_AP
 parser = argparse.ArgumentParser()
 # Model arguments
 parser.add_argument('--model', type=str, default='AutoEncoder')
+parser.add_argument('--model_type', type=str, default='default', choices=['default', 'dit'])
 parser.add_argument('--latent_dim', type=int, default=256)
 parser.add_argument('--num_steps', type=int, default=200)
 parser.add_argument('--beta_1', type=float, default=1e-4)
@@ -26,6 +27,17 @@ parser.add_argument('--sched_mode', type=str, default='linear')
 parser.add_argument('--flexibility', type=float, default=0.0)
 parser.add_argument('--residual', type=eval, default=True, choices=[True, False])
 parser.add_argument('--resume', type=str, default=None)
+
+# DiT model arguments
+parser.add_argument('--dit_hidden_size', type=int, default=1152)
+parser.add_argument('--dit_depth', type=int, default=8)
+parser.add_argument('--dit_num_heads', type=int, default=8)
+parser.add_argument('--dit_patch_size', type=int, default=4)
+parser.add_argument('--dit_input_size', type=int, default=32)
+parser.add_argument('--dit_mlp_ratio', type=float, default=4.0)
+parser.add_argument('--dit_window_size', type=int, default=0, help='Window size for window attention (0 means global attention)')
+parser.add_argument('--dit_window_block_indexes', type=tuple, default='0,3,6,9', help='Comma-separated list of block indexes to use window attention (e.g., "0,4,8")')
+parser.add_argument('--dit_use_rel_pos', type=eval, default=False, choices=[True, False], help='Whether to use relative position embeddings in attention') 
 
 # Datasets and loaders
 parser.add_argument('--dataset', type=str, default='ShapeNetAD')
@@ -111,10 +123,11 @@ logger.info('Building model...')
 if args.resume is not None:
     logger.info('Resuming from checkpoint...')
     ckpt = torch.load(args.resume)
-    model = getattr(sys.modules[__name__], args.model)(ckpt['args']).to(args.device)
+        model = getattr(sys.modules[__name__], args.model)(ckpt['args']).to(args.device)
     model.load_state_dict(ckpt['state_dict'])
 else:
-    model = getattr(sys.modules[__name__], args.model)(args).to(args.device)
+        logger.info('Using default model')
+        model = getattr(sys.modules[__name__], args.model)(args).to(args.device)
 logger.info(repr(model))
 
 
@@ -231,10 +244,12 @@ try:
     it = 1
     while it <= args.max_iters:
         train(it)
-        if it % args.val_freq == 0 or it == args.max_iters:
+        if it % args.val_freq == 0:
             with torch.no_grad():
                 score = validate_loss(it)
                 validate_inspect(it)
+        # save checkpoint only at the final iteration
+        if it == args.max_iters:
             opt_states = {
                 'optimizer': optimizer.state_dict(),
                 'scheduler': scheduler.state_dict(),

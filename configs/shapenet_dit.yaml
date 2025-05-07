@@ -1,0 +1,49 @@
+# ShapeNet-AD config with DiT integration
+dataset: ShapeNetAD
+dataset_path: ./data/shapenet-ad
+scale_mode: shape_unit
+num_points: 2048
+num_aug: 2048
+train_batch_size: 64
+val_batch_size: 64
+rotate: True
+rel: False
+
+# Model parameters
+model: AutoEncoder
+latent_dim: 256
+num_steps: 200
+beta_1: 1e-4
+beta_T: 0.05
+sched_mode: linear
+flexibility: 0.0
+residual: True
+
+# DiT specific parameters
+dit_hidden_size: 1152
+dit_depth: 8
+dit_num_heads: 8
+dit_patch_size: 4
+dit_input_size: 32
+dit_mlp_ratio: 4.0
+
+# Window attention parameters
+dit_window_size: 4  # Set to 0 to use global attention
+dit_use_rel_pos: False  # Whether to use relative position embeddings in attention
+
+# Optimizer and scheduler
+lr: 1e-3
+weight_decay: 0
+max_grad_norm: 10
+end_lr: 1e-4
+sched_start_epoch: 20000
+sched_end_epoch: 40000
+
+# Training
+seed: 2023
+logging: True
+max_iters: 40000
+val_freq: 1000
+num_val_batches: -1
+num_inspect_batches: 1
+num_inspect_pointclouds: 4

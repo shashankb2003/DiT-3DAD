@@ -3,7 +3,7 @@ from torch.nn import Module
 
 from .encoders import *
 from .diffusion import *
-
+from .dit3d_window_attn import *
 
 class AutoEncoder(Module):
 
@@ -12,8 +12,21 @@ class AutoEncoder(Module):
         self.args = args
         self.encoder = PointNetEncoder(zdim=args.latent_dim, input_dim=3)
         self.diffusion = DiffusionPoint(
-            net = PointwiseNet(point_dim=3, context_dim=args.latent_dim, residual=args.residual),
-            var_sched = VarianceSchedule(
+            net=DiT(
+                point_dim=3,
+                hidden_size=args.dit_hidden_size,
+                depth=args.dit_depth,
+                num_heads=args.dit_num_heads,
+                patch_size=args.dit_patch_size,
+                input_size=args.dit_input_size,
+                mlp_ratio=args.dit_mlp_ratio,
+                window_size=args.dit_window_size if hasattr(args, 'dit_window_size') else 0,
+                window_block_indexes=args.dit_window_block_indexes,
+                use_rel_pos=args.dit_use_rel_pos if hasattr(args, 'dit_use_rel_pos') else False,
+                rel_pos_zero_init=True,
+                latent_dim=args.latent_dim
+            ),
+            var_sched=VarianceSchedule(
                 num_steps=args.num_steps,
                 beta_1=args.beta_1,
                 beta_T=args.beta_T,
