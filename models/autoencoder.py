@@ -3,7 +3,7 @@ from torch.nn import Module
 
 from .encoders import *
 from .diffusion import *
-from .dit3d_window_attn import *
+from .dit_ada_window import *
 
 class AutoEncoder(Module):
 

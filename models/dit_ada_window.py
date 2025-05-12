@@ -13,12 +13,13 @@ import torch
 import torch.nn as nn
 import numpy as np
 import math
-from models.encoders.pointCNNencoder import PointCNNEncoder
 from timm.models.layers import to_2tuple
-from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
+from timm.models.vision_transformer import PatchEmbed, Mlp
 
 from modules.voxelization import Voxelization
 import modules.functional as F
+from .encoders import PointNetEncoder
+from utils_vit import *
 
 
 def modulate(x, shift, scale):
@@ -28,6 +29,64 @@ def modulate(x, shift, scale):
 #################################################################################
 #               Embedding Layers for Timesteps and Class Labels                 #
 #################################################################################
+
+class Attention(nn.Module):
+    """Multi-head Attention block with relative position embeddings."""
+
+    def __init__(
+        self,
+        dim,
+        num_heads=8,
+        qkv_bias=True,
+        use_rel_pos=False,
+        rel_pos_zero_init=True,
+        input_size=None,
+    ):
+        """
+        Args:
+            dim (int): Number of input channels.
+            num_heads (int): Number of attention heads.
+            qkv_bias (bool:  If True, add a learnable bias to query, key, value.
+            rel_pos (bool): If True, add relative positional embeddings to the attention map.
+            rel_pos_zero_init (bool): If True, zero initialize relative positional parameters.
+            input_size (int or None): Input resolution for calculating the relative positional
+                parameter size.
+        """
+        super().__init__()
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        self.scale = head_dim**-0.5
+
+        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.proj = nn.Linear(dim, dim)
+
+        self.use_rel_pos = use_rel_pos
+        if self.use_rel_pos:
+            # initialize relative positional embeddings
+            self.rel_pos_x = nn.Parameter(torch.zeros(2 * input_size[0] - 1, head_dim))
+            self.rel_pos_y = nn.Parameter(torch.zeros(2 * input_size[1] - 1, head_dim))
+            self.rel_pos_z = nn.Parameter(torch.zeros(2 * input_size[2] - 1, head_dim))
+
+            if not rel_pos_zero_init:
+                nn.init.trunc_normal_(self.rel_pos_x, std=0.02)
+                nn.init.trunc_normal_(self.rel_pos_y, std=0.02)
+                nn.init.trunc_normal_(self.rel_pos_z, std=0.02)
+
+    def forward(self, x):
+        B, X, Y, Z, _ = x.shape
+        qkv = self.qkv(x).reshape(B, X*Y*Z, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.reshape(3, B * self.num_heads, X * Y * Z, -1).unbind(0)
+        attn = (q * self.scale) @ k.transpose(-2, -1)
+
+        if self.use_rel_pos:
+            attn = add_decomposed_rel_pos(attn, q, self.rel_pos_x, self.rel_pos_y, self.rel_pos_z, (X, Y, Z), (X, Y, Z))
+
+        attn = attn.softmax(dim=-1)
+        x = (attn @ v).view(B, self.num_heads, X, Y, Z, -1).permute(0, 2, 3, 4, 1, 5).reshape(B, X, Y, Z, -1)
+        x = self.proj(x)
+
+        return x
+    
 
 class PatchEmbed_Voxel(nn.Module):
     """ Voxel to Patch Embedding
@@ -90,84 +149,36 @@ class TimestepEmbedder(nn.Module):
         t_emb = self.mlp(t_freq)
         return t_emb
 
-#not needed for us
-# class LabelEmbedder(nn.Module):
-#     """
-#     Embeds class labels into vector representations. Also handles label dropout for classifier-free guidance.
-#     """
-#     def __init__(self, num_classes, hidden_size, dropout_prob):
-#         super().__init__()
-#         use_cfg_embedding = dropout_prob > 0
-#         self.embedding_table = nn.Embedding(num_classes + use_cfg_embedding, hidden_size)
-#         self.num_classes = num_classes
-#         self.dropout_prob = dropout_prob
 
-#     def token_drop(self, labels, force_drop_ids=None):
-#         """
-#         Drops labels to enable classifier-free guidance.
-#         """
-#         if force_drop_ids is None:
-#             drop_ids = torch.rand(labels.shape[0], device=labels.device) < self.dropout_prob
-#         else:
-#             drop_ids = force_drop_ids == 1
-#         # print('token drop drop_ids:', drop_ids, drop_ids.shape)
-#         labels = torch.where(drop_ids, self.num_classes, labels)
-#         return labels
-
-#     def forward(self, labels, train, force_drop_ids=None):
-#         use_dropout = self.dropout_prob > 0
-#         if (train and use_dropout) or (force_drop_ids is not None):
-#             labels = self.token_drop(labels, force_drop_ids)
-#         # print('token drop labels:', labels, labels.shape)
-#         embeddings = self.embedding_table(labels)
-#         return embeddings
-
-#latent shape embedder
-class PointNetEncoder(nn.Module):
-    def __init__(self, zdim, input_dim=3):
+class LabelEmbedder(nn.Module):
+    """
+    Embeds class labels into vector representations. Also handles label dropout for classifier-free guidance.
+    """
+    def __init__(self, num_classes, hidden_size, dropout_prob):
         super().__init__()
-        self.zdim = zdim
-        self.conv1 = nn.Conv1d(input_dim, 128, 1)
-        self.conv2 = nn.Conv1d(128, 128, 1)
-        self.conv3 = nn.Conv1d(128, 256, 1)
-        self.conv4 = nn.Conv1d(256, 512, 1)
-        self.bn1 = nn.BatchNorm1d(128)
-        self.bn2 = nn.BatchNorm1d(128)
-        self.bn3 = nn.BatchNorm1d(256)
-        self.bn4 = nn.BatchNorm1d(512)
+        use_cfg_embedding = dropout_prob > 0
+        self.embedding_table = nn.Embedding(num_classes + use_cfg_embedding, hidden_size)
+        self.num_classes = num_classes
+        self.dropout_prob = dropout_prob
 
-        # Mapping to [c], cmean
-        self.fc1_m = nn.Linear(512, 256)
-        self.fc2_m = nn.Linear(256, 128)
-        self.fc3_m = nn.Linear(128, zdim)
-        self.fc_bn1_m = nn.BatchNorm1d(256)
-        self.fc_bn2_m = nn.BatchNorm1d(128)
+    def token_drop(self, labels, force_drop_ids=None):
+        """
+        Drops labels to enable classifier-free guidance.
+        """
+        if force_drop_ids is None:
+            drop_ids = torch.rand(labels.shape[0], device=labels.device) < self.dropout_prob
+        else:
+            drop_ids = force_drop_ids == 1
+        labels = torch.where(drop_ids, self.num_classes, labels)
+        return labels
 
-        # Mapping to [c], cmean
-        self.fc1_v = nn.Linear(512, 256)
-        self.fc2_v = nn.Linear(256, 128)
-        self.fc3_v = nn.Linear(128, zdim)
-        self.fc_bn1_v = nn.BatchNorm1d(256)
-        self.fc_bn2_v = nn.BatchNorm1d(128)
+    def forward(self, labels, train, force_drop_ids=None):
+        use_dropout = self.dropout_prob > 0
+        if (train and use_dropout) or (force_drop_ids is not None):
+            labels = self.token_drop(labels, force_drop_ids)
+        embeddings = self.embedding_table(labels)
+        return embeddings
 
-    def forward(self, x):
-        x = x.transpose(1, 2)
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = F.relu(self.bn2(self.conv2(x)))
-        x = F.relu(self.bn3(self.conv3(x)))
-        x = self.bn4(self.conv4(x))
-        x = torch.max(x, 2, keepdim=True)[0]
-        x = x.view(-1, 512)
-
-        m = F.relu(self.fc_bn1_m(self.fc1_m(x)))
-        m = F.relu(self.fc_bn2_m(self.fc2_m(m)))
-        m = self.fc3_m(m)
-        v = F.relu(self.fc_bn1_v(self.fc1_v(x)))
-        v = F.relu(self.fc_bn2_v(self.fc2_v(v)))
-        v = self.fc3_v(v)
-
-        # Returns both mean and logvariance, just ignore the latter in deteministic cases.
-        return m, v
 
 #################################################################################
 #                                 Core DiT Model                                #
@@ -175,97 +186,87 @@ class PointNetEncoder(nn.Module):
 
 class DiTBlock(nn.Module):
     """
-    A DiT block with the architecture shown in the image (bottom to top):
-    1. Layer Norm -> Multi-Head Self-Attention
-    2. Layer Norm -> Multi-Head Cross-Attention (with conditioning input)
-    3. Layer Norm -> Pointwise Feedforward
-    Each with a residual connection
+    A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
     """
-    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, **block_kwargs):
+    def __init__(self, hidden_size, 
+                 num_heads, 
+                 mlp_ratio=4.0, 
+                 use_rel_pos=False,
+                 rel_pos_zero_init=True,
+                 window_size=0,
+                 use_residual_block=False,
+                 input_size=None, **block_kwargs):
         super().__init__()
-        
-        # Layer Norm -> Multi-Head Self-Attention
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.self_attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
+        self.attn = Attention(
+            hidden_size,
+            num_heads=num_heads,
+            qkv_bias=True,
+            use_rel_pos=use_rel_pos,
+            rel_pos_zero_init=rel_pos_zero_init,
+            input_size=input_size if window_size == 0 else (window_size, window_size, window_size),
+        )
+
+        self.input_size = input_size
         
-        # Layer Norm -> Multi-Head Cross-Attention
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        # For cross-attention, we need a custom implementation that can use conditioning as context
-        self.q_proj = nn.Linear(hidden_size, hidden_size, bias=True)
-        self.k_proj = nn.Linear(hidden_size, hidden_size, bias=True)
-        self.v_proj = nn.Linear(hidden_size, hidden_size, bias=True)
-        self.out_proj = nn.Linear(hidden_size, hidden_size, bias=True)
-        self.num_heads = num_heads
-        self.head_dim = hidden_size // num_heads
-        
-        # Layer Norm -> Pointwise Feedforward
-        self.norm3 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
-        approx_gelu = lambda: nn.GELU()
-        self.feedforward = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
+        # approx_gelu = lambda: nn.GELU(approximate="tanh")
+        approx_gelu = lambda: nn.GELU() # for torch 1.7.1
+        self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_size, 6 * hidden_size, bias=True)
+        )
 
-    def cross_attention(self, q, c): # c is [B, 1, HiddenSize]
-        batch_size = q.shape[0]
-        num_patches_q = q.shape[1] # Sequence length of q
-
-        # Project queries from input sequence
-        # q input shape: [B, NumPatches, HiddenSize]
-        q_proj = self.q_proj(q).reshape(batch_size, num_patches_q, self.num_heads, self.head_dim).transpose(1, 2)
-        # q_proj shape: [B, NumHeads, NumPatches, HeadDim]
-
-        # Project keys and values from conditioning c
-        # c input shape: [B, 1, HiddenSize]
-        k_proj = self.k_proj(c).reshape(batch_size, 1, self.num_heads, self.head_dim).transpose(1, 2)
-        v_proj = self.v_proj(c).reshape(batch_size, 1, self.num_heads, self.head_dim).transpose(1, 2)
-        # k_proj, v_proj shape: [B, NumHeads, 1, HeadDim]
-
-        # Compute scaled dot-product attention
-        attn_weights = (q_proj @ k_proj.transpose(-2, -1)) / (self.head_dim ** 0.5) # [B,H,N,D_h] @ [B,H,D_h,1] -> [B,H,N,1]
-        attn_weights = torch.softmax(attn_weights, dim=-1)
-
-        # Apply attention to values
-        out = attn_weights @ v_proj # [B,H,N,1] @ [B,H,1,D_h] -> [B,H,N,D_h]
-        out = out.transpose(1, 2).reshape(batch_size, num_patches_q, self.num_heads * self.head_dim)
-        out = self.out_proj(out)
-
-        return out
+        self.window_size = window_size
 
     def forward(self, x, c):
-        # Layer Norm -> Multi-Head Self-Attention
-        input_x = x
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
+                
+        shortcut = x
         x = self.norm1(x)
-        x = self.self_attn(x)
-        x = x + input_x  # Residual connection
+        B = x.shape[0]
+        x = x.reshape(B, self.input_size[0], self.input_size[1], self.input_size[2], -1)
         
-        # Layer Norm -> Multi-Head Cross-Attention
-        input_x = x
-        x = self.norm2(x)
-        # Reshape conditioning to match batch size
-        if c.dim() == 2:
-            c = c.unsqueeze(1)  # [B, D] -> [B, 1, D]
-        x = self.cross_attention(x, c)
-        x = x + input_x  # Residual connection
+        # Window partition
+        if self.window_size > 0:
+            X, Y, Z = x.shape[1], x.shape[2], x.shape[3]
+            x, pad_xyz = window_partition(x, self.window_size)
+
+        x = x.reshape(B, self.input_size[0] * self.input_size[1] * self.input_size[2], -1)
+        x = modulate(x, shift_msa, scale_msa)
+        x = x.reshape(B, self.input_size[0], self.input_size[1], self.input_size[2], -1)
+
+        x = self.attn(x)
         
-        # Layer Norm -> Pointwise Feedforward
-        input_x = x
-        x = self.norm3(x)
-        x = self.feedforward(x)
-        x = x + input_x  # Residual connection
+        # Reverse window partition
+        if self.window_size > 0:
+            x = window_unpartition(x, self.window_size, pad_xyz, (X, Y, Z))
+        x = x.reshape(B, self.input_size[0] * self.input_size[1] * self.input_size[2], -1)
+
+        x = shortcut + gate_msa.unsqueeze(1) * x
+        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         
         return x
 
+
 class FinalLayer(nn.Module):
     """
-    The final layer of DiT - simple Layer Norm followed by Linear.
+    The final layer of DiT.
     """
     def __init__(self, hidden_size, patch_size, out_channels):
         super().__init__()
         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.linear = nn.Linear(hidden_size, patch_size * patch_size * patch_size * out_channels, bias=True)
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_size, 2 * hidden_size, bias=True)
+        )
 
     def forward(self, x, c):
-        # Simple Layer Norm and Linear
-        x = self.norm_final(x)
+        shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
+        x = modulate(self.norm_final(x), shift, scale)
         x = self.linear(x)
         return x
 
@@ -286,7 +287,11 @@ class DiT(nn.Module):
         class_dropout_prob=0.1,
         num_classes=1,
         learn_sigma=False,
-        latent_dim=256  # Added parameter for latent dimension
+        window_size=0,
+        window_block_indexes=(),
+        use_rel_pos=False,
+        rel_pos_zero_init=True,
+        latent_dim=256
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -302,19 +307,22 @@ class DiT(nn.Module):
         num_patches = self.x_embedder.num_patches
         
         self.t_embedder = TimestepEmbedder(hidden_size)
-        self.y_embedder = PointCNNEncoder(zdim=latent_dim, input_dim=3)
+        self.y_embedder = PointNetEncoder(zdim=latent_dim, input_dim=3)
 
         # Will use fixed sin-cos embedding:
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
 
         self.blocks = nn.ModuleList([
-            DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)
+            DiTBlock(hidden_size, 
+                     num_heads, 
+                     mlp_ratio=mlp_ratio,
+                     use_rel_pos=use_rel_pos,
+                     rel_pos_zero_init=rel_pos_zero_init,
+                     window_size=window_size if i in window_block_indexes else 0,
+                     input_size=(input_size // patch_size, input_size // patch_size, input_size // patch_size)
+                     ) for i in range(depth)
         ])
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
-        self.shape_proj = nn.Sequential(
-            nn.Linear(latent_dim, hidden_size),
-            nn.SiLU() # or another activation
-        )
         self.initialize_weights()
 
     def initialize_weights(self):
@@ -334,18 +342,21 @@ class DiT(nn.Module):
         w = self.x_embedder.proj.weight.data
         nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
 
+
         # Initialize timestep embedding MLP:
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
 
+        # Zero-out adaLN modulation layers in DiT blocks:
+        for block in self.blocks:
+            nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
+
         # Zero-out output layers:
+        nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
+        nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
-
-        # Initialize shape projection layer
-        nn.init.xavier_uniform_(self.shape_proj[0].weight)
-        if self.shape_proj[0].bias is not None:
-            nn.init.constant_(self.shape_proj[0].bias, 0)
 
     def unpatchify_voxels(self, x0):
         """
@@ -362,7 +373,7 @@ class DiT(nn.Module):
         points = x0.reshape(shape=(x0.shape[0], c, x * p, y * p, z * p))
         return points
 
-    def forward(self, x, t):
+    def forward(self, x, t, y):
         """
         Forward pass of DiT.
         x: (N, C, P) tensor of spatial inputs (point clouds or latent representations of images)
@@ -384,28 +395,26 @@ class DiT(nn.Module):
 
         # Embed voxelized noisy pointcloud
         x = self.x_embedder(x_voxelized) 
-        x = x + self.pos_embed 
+        x = x + self.pos_embed                         
 
         for block in self.blocks:
             x = block(x, c)                      
-        x = self.final_layer(x, c)                
-        x = self.unpatchify_voxels(x)                   
+        x = self.final_layer(x, c)
+        x = self.unpatchify_voxels(x)           
 
         # Devoxelization
         x = F.trilinear_devoxelize(x, voxel_coords, self.input_size, self.training)
 
         return x
 
-    #we wont need classifier-free guidance
-    def forward_with_cfg(self, x, t, cfg_scale):
+    def forward_with_cfg(self, x, t, y, cfg_scale):
         """
         Forward pass of DiT, but also batches the unconditional forward pass for classifier-free guidance.
         """
         # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
         half = x[: len(x) // 2]
         combined = torch.cat([half, half], dim=0)
-        model_out = self.forward(combined, t)
-        
+        model_out = self.forward(combined, t, y)
         # For exact reproducibility reasons, we apply classifier-free guidance on only
         # three channels by default. The standard approach to cfg applies it to all channels.
         # This can be done by uncommenting the following line and commenting-out the line following that.
@@ -528,7 +537,7 @@ def DiT_XL_4(pretrained=False, **kwargs):
 
     model = DiT(depth=28, hidden_size=1152, patch_size=4, num_heads=16, **kwargs)
     if pretrained:
-        checkpoint = torch.load('/path/to/DiT2D_pretrained_weights/DiT-XL-2-512x512.pt', map_location='cpu')
+        checkpoint = torch.load('./path/to/DiT2D_pretrained_weights/DiT-XL-2-512x512.pt', map_location='cpu')
         if "ema" in checkpoint:  # supports ema checkpoints 
             checkpoint = checkpoint["ema"]
         checkpoint_blocks = {k: checkpoint[k] for k in checkpoint if k.startswith('blocks')}
@@ -581,7 +590,7 @@ def DiT_S_4(pretrained=False, **kwargs):
 
     model = DiT(depth=12, hidden_size=384, patch_size=4, num_heads=6, **kwargs)
     if pretrained:
-        checkpoint = torch.load('/path/to/DiT2D_pretrained_weights/DiT-S-4.pth', map_location='cpu')
+        checkpoint = torch.load('/path/to/DiT2D_pretrained_weights/DiT-S-4.pt', map_location='cpu')
         if "ema" in checkpoint:  # supports ema checkpoints 
             checkpoint = checkpoint["ema"]
         checkpoint_blocks = {k: checkpoint[k] for k in checkpoint if k.startswith('blocks')}
@@ -599,7 +608,7 @@ def DiT_S_16(pretrained=False, **kwargs):
 def DiT_S_32(pretrained=False, **kwargs):
     return DiT(depth=12, hidden_size=384, patch_size=32, num_heads=6, **kwargs)
 
-DiT3D_models = {
+DiT3D_models_WindAttn = {
     'DiT-XL/2': DiT_XL_2,  'DiT-XL/4': DiT_XL_4,  'DiT-XL/8': DiT_XL_8,
     'DiT-L/2':  DiT_L_2,   'DiT-L/4':  DiT_L_4,   'DiT-L/8':  DiT_L_8,
     'DiT-B/2':  DiT_B_2,   'DiT-B/4':  DiT_B_4,   'DiT-B/8':  DiT_B_8,
