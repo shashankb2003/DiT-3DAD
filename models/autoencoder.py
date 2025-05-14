@@ -13,7 +13,6 @@ class AutoEncoder(Module):
         self.encoder = PointNetEncoder(zdim=args.latent_dim, input_dim=3)
         self.diffusion = DiffusionPoint(
             net=DiT(
-                point_dim=3,
                 hidden_size=args.dit_hidden_size,
                 depth=args.dit_depth,
                 num_heads=args.dit_num_heads,

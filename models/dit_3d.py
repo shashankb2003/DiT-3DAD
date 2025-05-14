@@ -14,7 +14,7 @@ import torch.nn as nn
 import numpy as np
 import math
 from models.encoders.pointCNNencoder import PointCNNEncoder
-from timm.models.layers import to_2tuple
+from timm.layers import to_2tuple
 from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
 
 from modules.voxelization import Voxelization
