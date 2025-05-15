@@ -13,14 +13,14 @@ import torch
 import torch.nn as nn
 import numpy as np
 import math
-from timm.models.layers import to_2tuple
+from timm.layers import to_2tuple
 from timm.models.vision_transformer import PatchEmbed, Mlp
 from .encoders import PointNetEncoder
 
 from modules.voxelization import Voxelization
 import modules.functional as F
 
-from utils_vit import *
+from .utils_vit import *
 
 
 def modulate(x, shift, scale):
@@ -380,8 +380,6 @@ class DiT(nn.Module):
         w = self.x_embedder.proj.weight.data
         nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
 
-        # Initialize label embedding table:
-        nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
 
         # Initialize timestep embedding MLP:
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)

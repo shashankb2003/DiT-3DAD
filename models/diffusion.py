@@ -113,7 +113,7 @@ class DiffusionPoint(Module):
         c1 = torch.sqrt(1 - alpha_bar).view(-1, 1, 1)   # (B, 1, 1)
 
         e_rand = torch.randn_like(x_0)  # (B, N, d)
-        e_theta = self.net(c0 * x_0 + c1 * e_rand, beta=beta, context=context)
+        e_theta = self.net(c0 * x_0 + c1 * e_rand,t=beta)
 
         if x_raw is not None:
             e_dist = (c0 * x_0 + c1 * e_rand - c1 * e_theta) / c0

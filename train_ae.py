@@ -150,7 +150,7 @@ def train(it):
     # Load data
     batch = next(train_iter)
     x = batch['pointcloud'].to(args.device)
-
+    x = x.transpose(1, 2)
     if it == 1:
         memory_bank.append(x)
         writer.add_mesh('train/pc', x, global_step=it)
@@ -161,6 +161,7 @@ def train(it):
     # Forward
     if args.rel:
         x_raw = batch['pointcloud_raw'].to(args.device)
+        x_raw = x_raw.transpose(1, 2)
         loss = model.get_loss(x, x_raw)
     else:
         loss = model.get_loss(x)
