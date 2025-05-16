@@ -123,7 +123,7 @@ logger.info('Building model...')
 if args.resume is not None:
     logger.info('Resuming from checkpoint...')
     ckpt = torch.load(args.resume)
-        model = getattr(sys.modules[__name__], args.model)(ckpt['args']).to(args.device)
+    model = getattr(sys.modules[__name__], args.model)(ckpt['args']).to(args.device)
     model.load_state_dict(ckpt['state_dict'])
 else:
         logger.info('Using default model')

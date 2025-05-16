@@ -1,13 +1,11 @@
 # ShapeNet-AD config with DiT integration
 dataset: ShapeNetAD
 dataset_path: ./data/shapenet-ad
-scale_mode: shape_unit
 num_points: 2048
 num_aug: 2048
 train_batch_size: 64
 val_batch_size: 64
-rotate: True
-rel: False
+rel: True
 
 # Model parameters
 model: AutoEncoder
