@@ -16,9 +16,12 @@ import math
 from timm.layers import to_2tuple
 from timm.models.vision_transformer import PatchEmbed, Mlp
 from .encoders import PointNetEncoder
+from timm.models.layers import DropPath
 
 from modules.voxelization import Voxelization
 import modules.functional as F
+
+from dit_blocks import Attention, MultiHeadCrossAttention, t2i_modulate, TimestepEmbedder, T2IFinalLayer
 
 from .utils_vit import *
 
@@ -31,63 +34,6 @@ def modulate(x, shift, scale):
 #               Embedding Layers for Timesteps and Class Labels                 #
 #################################################################################
 
-class Attention(nn.Module):
-    """Multi-head Attention block with relative position embeddings."""
-
-    def __init__(
-        self,
-        dim,
-        num_heads=8,
-        qkv_bias=True,
-        use_rel_pos=False,
-        rel_pos_zero_init=True,
-        input_size=None,
-    ):
-        """
-        Args:
-            dim (int): Number of input channels.
-            num_heads (int): Number of attention heads.
-            qkv_bias (bool:  If True, add a learnable bias to query, key, value.
-            rel_pos (bool): If True, add relative positional embeddings to the attention map.
-            rel_pos_zero_init (bool): If True, zero initialize relative positional parameters.
-            input_size (int or None): Input resolution for calculating the relative positional
-                parameter size.
-        """
-        super().__init__()
-        self.num_heads = num_heads
-        head_dim = dim // num_heads
-        self.scale = head_dim**-0.5
-
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.proj = nn.Linear(dim, dim)
-
-        self.use_rel_pos = use_rel_pos
-        if self.use_rel_pos:
-            # initialize relative positional embeddings
-            self.rel_pos_x = nn.Parameter(torch.zeros(2 * input_size[0] - 1, head_dim))
-            self.rel_pos_y = nn.Parameter(torch.zeros(2 * input_size[1] - 1, head_dim))
-            self.rel_pos_z = nn.Parameter(torch.zeros(2 * input_size[2] - 1, head_dim))
-
-            if not rel_pos_zero_init:
-                nn.init.trunc_normal_(self.rel_pos_x, std=0.02)
-                nn.init.trunc_normal_(self.rel_pos_y, std=0.02)
-                nn.init.trunc_normal_(self.rel_pos_z, std=0.02)
-
-    def forward(self, x):
-        B, X, Y, Z, _ = x.shape
-        qkv = self.qkv(x).reshape(B, X*Y*Z, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv.reshape(3, B * self.num_heads, X * Y * Z, -1).unbind(0)
-        attn = (q * self.scale) @ k.transpose(-2, -1)
-
-        if self.use_rel_pos:
-            attn = add_decomposed_rel_pos(attn, q, self.rel_pos_x, self.rel_pos_y, self.rel_pos_z, (X, Y, Z), (X, Y, Z))
-
-        attn = attn.softmax(dim=-1)
-        x = (attn @ v).view(B, self.num_heads, X, Y, Z, -1).permute(0, 2, 3, 4, 1, 5).reshape(B, X, Y, Z, -1)
-        x = self.proj(x)
-
-        return x
-    
 
 class PatchEmbed_Voxel(nn.Module):
     """ Voxel to Patch Embedding
@@ -111,80 +57,39 @@ class PatchEmbed_Voxel(nn.Module):
         return x
     
 
-class TimestepEmbedder(nn.Module):
-    """
-    Embeds scalar timesteps into vector representations.
-    """
-    def __init__(self, hidden_size, frequency_embedding_size=256):
-        super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(frequency_embedding_size, hidden_size, bias=True),
-            nn.SiLU(),
-            nn.Linear(hidden_size, hidden_size, bias=True),
-        )
-        self.frequency_embedding_size = frequency_embedding_size
-
-    @staticmethod
-    def timestep_embedding(t, dim, max_period=10000):
-        """
-        Create sinusoidal timestep embeddings.
-        :param t: a 1-D Tensor of N indices, one per batch element.
-                          These may be fractional.
-        :param dim: the dimension of the output.
-        :param max_period: controls the minimum frequency of the embeddings.
-        :return: an (N, D) Tensor of positional embeddings.
-        """
-        # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
-        half = dim // 2
-        freqs = torch.exp(
-            -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
-        ).to(device=t.device)
-        args = t[:, None].float() * freqs[None]
-        embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-        if dim % 2:
-            embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
-        return embedding
-
-    def forward(self, t):
-        t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
-        t_emb = self.mlp(t_freq)
-        return t_emb
-
-
-class LabelEmbedder(nn.Module):
-    """
-    Embeds class labels into vector representations. Also handles label dropout for classifier-free guidance.
-    """
-    def __init__(self, num_classes, hidden_size, dropout_prob):
-        super().__init__()
-        use_cfg_embedding = dropout_prob > 0
-        self.embedding_table = nn.Embedding(num_classes + use_cfg_embedding, hidden_size)
-        self.num_classes = num_classes
-        self.dropout_prob = dropout_prob
-
-    def token_drop(self, labels, force_drop_ids=None):
-        """
-        Drops labels to enable classifier-free guidance.
-        """
-        if force_drop_ids is None:
-            drop_ids = torch.rand(labels.shape[0], device=labels.device) < self.dropout_prob
-        else:
-            drop_ids = force_drop_ids == 1
-        labels = torch.where(drop_ids, self.num_classes, labels)
-        return labels
-
-    def forward(self, labels, train, force_drop_ids=None):
-        use_dropout = self.dropout_prob > 0
-        if (train and use_dropout) or (force_drop_ids is not None):
-            labels = self.token_drop(labels, force_drop_ids)
-        embeddings = self.embedding_table(labels)
-        return embeddings
-
-
 #################################################################################
 #                                 Core DiT Model                                #
 #################################################################################
+# class PixArtBlock(nn.Module):
+#     """
+#     A PixArt block with adaptive layer norm (adaLN-single) conditioning.
+#     """
 
+#     def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, drop_path=0., window_size=0, input_size=None, use_rel_pos=False, **block_kwargs):
+#         super().__init__()
+#         self.hidden_size = hidden_size
+#         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+#         self.attn = WindowAttention(hidden_size, num_heads=num_heads, qkv_bias=True,
+#                                     input_size=input_size if window_size == 0 else (window_size, window_size),
+#                                     use_rel_pos=use_rel_pos, **block_kwargs)
+#         self.cross_attn = MultiHeadCrossAttention(hidden_size, num_heads, **block_kwargs)
+#         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+#         # to be compatible with lower version pytorch
+#         approx_gelu = lambda: nn.GELU(approximate="tanh")
+#         self.mlp = Mlp(in_features=hidden_size, hidden_features=int(hidden_size * mlp_ratio), act_layer=approx_gelu, drop=0)
+#         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+#         self.window_size = window_size
+#         self.scale_shift_table = nn.Parameter(torch.randn(6, hidden_size) / hidden_size ** 0.5)
+
+#     def forward(self, x, y, t, mask=None, **kwargs):
+#         B, N, C = x.shape
+
+#         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (self.scale_shift_table[None] + t.reshape(B, 6, -1)).chunk(6, dim=1)
+#         x = x + self.drop_path(gate_msa * self.attn(t2i_modulate(self.norm1(x), shift_msa, scale_msa)).reshape(B, N, C))
+#         x = x + self.cross_attn(x, y, mask)
+#         x = x + self.drop_path(gate_mlp * self.mlp(t2i_modulate(self.norm2(x), shift_mlp, scale_mlp)))
+
+#         return x
 class DiTBlock(nn.Module):
     """
     A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
@@ -192,6 +97,7 @@ class DiTBlock(nn.Module):
     def __init__(self, hidden_size, 
                  num_heads, 
                  mlp_ratio=4.0, 
+                 drop_path=0.,
                  use_rel_pos=False,
                  rel_pos_zero_init=True,
                  window_size=0,
@@ -211,101 +117,24 @@ class DiTBlock(nn.Module):
         self.input_size = input_size
         
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.q_proj = nn.Linear(hidden_size, hidden_size, bias=True)
-        self.k_proj = nn.Linear(hidden_size, hidden_size, bias=True)
-        self.v_proj = nn.Linear(hidden_size, hidden_size, bias=True)
-        self.out_proj = nn.Linear(hidden_size, hidden_size, bias=True)
-        self.num_heads = num_heads
-        self.head_dim = hidden_size // num_heads
-        self.norm3 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.cross_attn = MultiHeadCrossAttention(hidden_size, num_heads, **block_kwargs)
+
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         approx_gelu = lambda: nn.GELU()
         self.feedforward = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
-
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.window_size = window_size
-    def cross_attention(self, q, c): # c is [B, 1, HiddenSize]
-        batch_size = q.shape[0]
-        num_patches_q = q.shape[1] # Sequence length of q
+        self.scale_shift_table = nn.Parameter(torch.randn(6, hidden_size) / hidden_size ** 0.5)
 
-        # Project queries from input sequence
-        # q input shape: [B, NumPatches, HiddenSize]
-        q_proj = self.q_proj(q).reshape(batch_size, num_patches_q, self.num_heads, self.head_dim).transpose(1, 2)
-        # q_proj shape: [B, NumHeads, NumPatches, HeadDim]
+    def forward(self, x, c, t, mask=None, **kwargs):
+        B, N, C = x.shape
 
-        # Project keys and values from conditioning c
-        # c input shape: [B, 1, HiddenSize]
-        k_proj = self.k_proj(c).reshape(batch_size, 1, self.num_heads, self.head_dim).transpose(1, 2)
-        v_proj = self.v_proj(c).reshape(batch_size, 1, self.num_heads, self.head_dim).transpose(1, 2)
-        # k_proj, v_proj shape: [B, NumHeads, 1, HeadDim]
-
-        # Compute scaled dot-product attention
-        attn_weights = (q_proj @ k_proj.transpose(-2, -1)) / (self.head_dim ** 0.5) # [B,H,N,D_h] @ [B,H,D_h,1] -> [B,H,N,1]
-        attn_weights = torch.softmax(attn_weights, dim=-1)
-
-        # Apply attention to values
-        out = attn_weights @ v_proj # [B,H,N,1] @ [B,H,1,D_h] -> [B,H,N,D_h]
-        out = out.transpose(1, 2).reshape(batch_size, num_patches_q, self.num_heads * self.head_dim)
-        out = self.out_proj(out)
-
-        return out
-    def forward(self, x, c):
-        #shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (self.scale_shift_table[None] + t.reshape(B, 6, -1)).chunk(6, dim=1)
+        x = x + self.drop_path(gate_msa * self.attn(t2i_modulate(self.norm1(x), shift_msa, scale_msa)).reshape(B, N, C))
+        x = x + self.cross_attn(x, c, mask)
+        x = x + self.drop_path(gate_mlp * self.mlp(t2i_modulate(self.norm2(x), shift_mlp, scale_mlp)))
                 
-        shortcut = x
-        x = self.norm1(x)
-        B = x.shape[0]
-        x = x.reshape(B, self.input_size[0], self.input_size[1], self.input_size[2], -1)
-        
-        # Window partition
-        if self.window_size > 0:
-            X, Y, Z = x.shape[1], x.shape[2], x.shape[3]
-            x, pad_xyz = window_partition(x, self.window_size)
-
-        # x = x.reshape(B, self.input_size[0] * self.input_size[1] * self.input_size[2], -1)
-        # x = modulate(x, shift_msa, scale_msa)
-        # x = x.reshape(B, self.input_size[0], self.input_size[1], self.input_size[2], -1)
-
-        x = self.attn(x)
-        
-        # Reverse window partition
-        if self.window_size > 0:
-            x = window_unpartition(x, self.window_size, pad_xyz, (X, Y, Z))
-        x = x.reshape(B, self.input_size[0] * self.input_size[1] * self.input_size[2], -1)
-
-        # x = shortcut + gate_msa.unsqueeze(1) * x
-        # x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
-        x=x+shortcut #residual connection
-        shortcut=x
-        x=self.norm2(x)
-        
-        # Reshape conditioning to match batch size
-        if c.dim() == 2:
-            c = c.unsqueeze(1)  # [B, D] -> [B, 1, D]
-        x=self.cross_attention(x,c)
-        
-        x=x+shortcut
-        # Layer Norm -> Pointwise Feedforward
-        shortcut=x
-        x = self.norm3(x)
-        x = self.feedforward(x)
-        x = x + shortcut  # Residual connection
         return x
-
-
-class FinalLayer(nn.Module):
-    """
-    The final layer of DiT.
-    """
-    def __init__(self, hidden_size, patch_size, out_channels):
-        super().__init__()
-        self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.linear = nn.Linear(hidden_size, patch_size * patch_size * patch_size * out_channels, bias=True)
-        
-    def forward(self, x, c):
-        x = self.norm_final(x)
-        x = self.linear(x)
-        return x
-
 
 class DiT(nn.Module):
     """
@@ -341,7 +170,7 @@ class DiT(nn.Module):
         num_patches = self.x_embedder.num_patches
         
         self.t_embedder = TimestepEmbedder(hidden_size)
-        self.y_embedder = PointNetEncoder(zdim=latent_dim, input_dim=3)
+        self.shape_embedder = PointNetEncoder(zdim=latent_dim, input_dim=3)
 
         # Will use fixed sin-cos embedding:
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
@@ -356,8 +185,8 @@ class DiT(nn.Module):
                      input_size=(input_size // patch_size, input_size // patch_size, input_size // patch_size)
                      ) for i in range(depth)
         ])
-        self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
-        self.shape_proj = nn.Sequential(
+        self.final_layer = T2IFinalLayer(hidden_size, patch_size, self.out_channels)
+        self.shape_embedding_proj = nn.Sequential(
             nn.Linear(latent_dim, hidden_size),
             nn.SiLU() # or another activation
         )
@@ -385,21 +214,19 @@ class DiT(nn.Module):
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
 
-        # Zero-out adaLN modulation layers in DiT blocks:
-        # for block in self.blocks:
-        #     nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
-        #     nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
+        # Zero-out cross attn layers in DiT blocks:
+        for block in self.blocks:
+            nn.init.constant_(block.cross_attn.proj.weight, 0)
+            nn.init.constant_(block.cross_attn.proj.bias, 0)
 
         # # Zero-out output layers:
-        # nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
-        # nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
         
         # Initialize shape projection layer
-        nn.init.xavier_uniform_(self.shape_proj[0].weight)
-        if self.shape_proj[0].bias is not None:
-            nn.init.constant_(self.shape_proj[0].bias, 0)
+        nn.init.xavier_uniform_(self.shape_embedding_proj[0].weight)
+        if self.shape_embedding_proj[0].bias is not None:
+            nn.init.constant_(self.shape_embedding_proj[0].bias, 0)
 
     def unpatchify_voxels(self, x0):
         """
@@ -427,19 +254,19 @@ class DiT(nn.Module):
         x_voxelized, voxel_coords = self.voxelization(features, coords)
 
         # Get shape embedding from the input pointcloud (before adding noise)
-        # PointCNNEncoder expects [B, N, 3] format
-        shape_embedding, _ = self.y_embedder(point_cloud)
-        shape_embedding = self.shape_proj(shape_embedding) # Project to hidden_size
+        # PointNetEncoder expects [B, N, 3] format
+        shape_embedding, _ = self.shape_embedder(x)
+        shape_embedding = self.shape_embedding_proj(shape_embedding) # Project to hidden_size
+        shape_embedding = shape_embedding.unsqueeze(1)
         t = self.t_embedder(t)
-        c = t + shape_embedding
 
         # Embed voxelized noisy pointcloud
         x = self.x_embedder(x_voxelized) 
         x = x + self.pos_embed 
 
         for block in self.blocks:
-            x = block(x, c)                      
-        x = self.final_layer(x, c)                
+            x = block(x, shape_embedding, t)                      
+        x = self.final_layer(x, t)                
         x = self.unpatchify_voxels(x)                   
 
         # Devoxelization
