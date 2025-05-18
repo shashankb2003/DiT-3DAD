@@ -386,9 +386,7 @@ class DiT(nn.Module):
 
         # Get shape embedding from the input pointcloud (before adding noise)
         # PointCNNEncoder expects [B, N, 3] format
-        B, C, P = x.shape
-        point_cloud = x.transpose(1, 2)  # [B, P, C]
-        shape_embedding, _ = self.y_embedder(point_cloud)
+        shape_embedding, _ = self.y_embedder(x)
         shape_embedding = self.shape_proj(shape_embedding) # Project to hidden_size
         t = self.t_embedder(t)
         c = t + shape_embedding
