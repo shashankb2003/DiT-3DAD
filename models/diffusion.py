@@ -113,12 +113,12 @@ class DiffusionPoint(Module):
         c1 = torch.sqrt(1 - alpha_bar).view(-1, 1, 1)   # (B, 1, 1)
 
         e_rand = torch.randn_like(x_0)  # (B, N, d)
-        e_theta = self.net(c0 * x_0 + c1 * e_rand, beta=beta, context=context)
+        e_theta = self.net(c0 * x_0 + c1 * e_rand, t=beta)
 
         if x_raw is not None:
             e_dist = (c0 * x_0 + c1 * e_rand - c1 * e_theta) / c0
             c_raw = x_0 + e_dist
-            loss = F.mse_loss(c_raw.view(-1, point_dim), x_raw.view(-1, point_dim), reduction='mean')
+            loss = F.mse_loss(c_raw.reshape(-1, point_dim), x_raw.reshape(-1, point_dim), reduction='mean')
         else:
             loss = F.mse_loss(e_theta.view(-1, point_dim), e_rand.view(-1, point_dim), reduction='mean')
         return loss
@@ -138,7 +138,7 @@ class DiffusionPoint(Module):
 
             x_t = traj[t]
             beta = self.var_sched.betas[[t]*batch_size]
-            e_theta = self.net(x_t, beta=beta, context=context)
+            e_theta = self.net(x_t, t=beta)
             x_next = c0 * (x_t - c1 * e_theta) + sigma * z
             traj[t-1] = x_next.detach()     # Stop gradient and save trajectory.
             traj[t] = traj[t].cpu()         # Move previous output to CPU memory.

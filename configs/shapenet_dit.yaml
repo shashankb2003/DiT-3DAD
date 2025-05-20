@@ -6,8 +6,8 @@ num_points: 2048
 num_aug: 2048
 train_batch_size: 64
 val_batch_size: 64
-rotate: True
-rel: False
+rotate: False
+rel: True
 
 # Model parameters
 model: AutoEncoder

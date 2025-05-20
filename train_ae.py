@@ -18,8 +18,9 @@ from evaluation import ROC_AP
 
 # Arguments
 parser = argparse.ArgumentParser()
-# Distributed training arguments
-parser.add_argument('--local_rank', type=int, default=-1, help='Local rank for distributed training')
+# Get local_rank from environment variable
+import os
+local_rank = int(os.environ.get('LOCAL_RANK', -1))
 # Model arguments
 parser.add_argument('--model', type=str, default='AutoEncoder')
 parser.add_argument('--model_type', type=str, default='default', choices=['default', 'dit'])
@@ -91,11 +92,12 @@ logger.info(args)
 
 def main():
     # Initialize distributed training
-    if args.local_rank != -1:
-        torch.cuda.set_device(args.local_rank)
-        args.device = f'cuda:{args.local_rank}'
+    if local_rank != -1:
+        torch.cuda.set_device(local_rank)
+        args.device = f'cuda:{local_rank}'
         dist.init_process_group(backend='nccl')
-    
+    else:
+        print('Not using distributed training')
     # Datasets and loaders
     train_transforms = []
     val_transforms = []
@@ -155,8 +157,8 @@ def main():
         model = getattr(sys.modules[__name__], args.model)(args).to(args.device)
     
     # Wrap model with DDP
-    if args.local_rank != -1:
-        model = DDP(model, device_ids=[args.local_rank])
+    if local_rank != -1:
+        model = DDP(model, device_ids=[local_rank])
     logger.info(repr(model))
 
     # Optimizer and scheduler
@@ -192,9 +194,9 @@ def main():
         if args.rel:
             x_raw = batch['pointcloud_raw'].to(args.device)
             x_raw = x_raw.transpose(1, 2)
-            loss = model.module.get_loss(x, x_raw) if args.local_rank != -1 else model.get_loss(x, x_raw)
+            loss = model.module.get_loss(x, x_raw) if local_rank != -1 else model.get_loss(x, x_raw)
         else:
-            loss = model.module.get_loss(x) if args.local_rank != -1 else model.get_loss(x)
+            loss = model.module.get_loss(x) if local_rank != -1 else model.get_loss(x)
 
         # Backward and optimize
         loss.backward()
@@ -202,7 +204,7 @@ def main():
         optimizer.step()
         scheduler.step()
 
-        if args.local_rank in [-1, 0]:  # Only log on main process
+        if local_rank in [-1, 0]:  # Only log on main process
             logger.info('[Train] Iter %04d | Loss %.6f | Grad %.4f ' % (it, loss.item(), orig_grad_norm))
             writer.add_scalar('train/loss', loss, it)
             writer.add_scalar('train/lr', optimizer.param_groups[0]['lr'], it)
@@ -219,11 +221,12 @@ def main():
             if args.num_val_batches > 0 and i >= args.num_val_batches:
                 break
             ref = batch['pointcloud'].to(args.device)
+            ref = ref.transpose(1, 2)
             shift = batch['shift'].to(args.device)
             scale = batch['scale'].to(args.device)
             with torch.no_grad():
                 model.eval()
-                if args.local_rank != -1:
+                if local_rank != -1:
                     code = model.module.encode(ref)
                     recons = model.module.decode(code, ref.size(1), flexibility=args.flexibility)
                 else:
@@ -242,7 +245,7 @@ def main():
         all_label = torch.cat(all_label, dim=0)
         all_mask = torch.cat(all_mask, dim=0)
 
-        if args.local_rank != -1:
+        if local_rank != -1:
             # Gather results from all processes
             all_ref = [torch.zeros_like(all_ref) for _ in range(dist.get_world_size())]
             all_recons = [torch.zeros_like(all_recons) for _ in range(dist.get_world_size())]
@@ -262,7 +265,7 @@ def main():
         metrics = ROC_AP(all_ref, all_recons, all_label, all_mask)
         roc_i, roc_p, ap_i, ap_p = metrics['ROC_i'].item(), metrics['ROC_p'].item(), metrics['AP_i'].item(), metrics['AP_p'].item()
         
-        if args.local_rank in [-1, 0]:  # Only log on main process
+        if local_rank in [-1, 0]:  # Only log on main process
             logger.info('[Val] Iter %04d | ROC_i_cdist %.6f | ROC_p_cdist %.6f | AP_i_cdist %.6f | AP_p_cdist %.6f' % (it, roc_i, roc_p, ap_i, ap_p))
             roc_i_nn, roc_p_nn, ap_i_nn, ap_p_nn = metrics['ROC_i_nn'].item(), metrics['ROC_p_nn'].item(), metrics['AP_i_nn'].item(), metrics['AP_p_nn'].item()
             logger.info('[Val] Iter %04d | ROC_i_nn %.6f | ROC_p_nn %.6f | AP_i_nn %.6f | AP_p_nn %.6f' % (it, roc_i_nn, roc_p_nn, ap_i_nn, ap_p_nn))
@@ -282,7 +285,7 @@ def main():
         for i, batch in enumerate(tqdm(val_loader, desc='Inspect')):
             x = batch['pointcloud'].to(args.device)
             model.eval()
-            if args.local_rank != -1:
+            if local_rank != -1:
                 code = model.module.encode(x)
                 recons = model.module.decode(code, x.size(1), flexibility=args.flexibility).detach()
             else:
@@ -294,7 +297,7 @@ def main():
             if i >= args.num_inspect_batches:
                 break
 
-        if args.local_rank in [-1, 0]:  # Only log on main process
+        if local_rank in [-1, 0]:  # Only log on main process
             writer.add_mesh('val/pc_in', x[:args.num_inspect_pointclouds], global_step=it)
             writer.add_mesh('val/pc_out', recons[:args.num_inspect_pointclouds], global_step=it)
             writer.flush()
@@ -315,14 +318,14 @@ def main():
                     'optimizer': optimizer.state_dict(),
                     'scheduler': scheduler.state_dict(),
                 }
-                model_to_save = model.module if args.local_rank != -1 else model
+                model_to_save = model.module if local_rank != -1 else model
                 ckpt_mgr.save(model_to_save, args, score, opt_states, it)
             it += 1
 
     except KeyboardInterrupt:
         logger.info('Terminating...')
     
-    if args.local_rank != -1:
+    if local_rank != -1:
         dist.destroy_process_group()
 
 if __name__ == '__main__':

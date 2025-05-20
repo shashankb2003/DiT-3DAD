@@ -137,7 +137,15 @@ def get_logger(name, log_dir=None):
 
 def get_new_log_dir(root='./logs', prefix='', postfix=''):
     log_dir = os.path.join(root, prefix + time.strftime('%Y_%m_%d__%H_%M_%S', time.localtime()) + postfix)
-    os.makedirs(log_dir)
+    try:
+        # Try to create the directory
+        os.makedirs(log_dir, exist_ok=True)
+    except FileExistsError:
+        # If the directory already exists, add a unique suffix
+        import random
+        random_suffix = f"_{random.randint(1000, 9999)}"
+        log_dir = os.path.join(root, prefix + time.strftime('%Y_%m_%d__%H_%M_%S', time.localtime()) + postfix + random_suffix)
+        os.makedirs(log_dir, exist_ok=True)
     return log_dir
 
 

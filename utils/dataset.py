@@ -164,9 +164,8 @@ class ShapeNetAD(Dataset):
                         label = 1
                     self.append(pc, pc, cate, pc_id, mask, label)
 
-        # Deterministically shuffle the dataset
+        # No need to shuffle here as DistributedSampler will handle shuffling during training
         self.pointclouds.sort(key=lambda data: data['id'], reverse=False)
-        random.shuffle(self.pointclouds)
 
     def __len__(self):
         return len(self.pointclouds)

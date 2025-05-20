@@ -8,8 +8,10 @@ from utils.dataset import all_shapenetad_cates
 
 
 def main(args):
+    # Get local_rank from environment variable
+    local_rank = int(os.environ.get('LOCAL_RANK', -1))
     # Only run on rank 0 to avoid multiple processes running the same training
-    if args.local_rank in [-1, 0]:  # -1 for non-distributed, 0 for distributed
+    if local_rank in [-1, 0]:  # -1 for non-distributed, 0 for distributed
         exp_name = Path(args.config).stem
         time_fix = time.strftime('%Y%m%d-%H%M%S', time.localtime())
         cfg_cmd = cmd_from_config(args.config)
@@ -32,7 +34,6 @@ if __name__ == "__main__":
     parser.add_argument('--model_type', type=str, default='default', choices=['default', 'dit'], 
                       help='Model type: default (original R3D-AD) or dit (with DiT transformer)')
     # Add distributed training arguments
-    parser.add_argument('--local_rank', type=int, default=-1, help='Local rank for distributed training')
     parser.add_argument('--nproc_per_node', type=int, default=1, help='Number of GPUs to use for training')
     args = parser.parse_args()
     main(args)

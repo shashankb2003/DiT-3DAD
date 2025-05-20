@@ -13,13 +13,13 @@ import torch
 import torch.nn as nn
 import numpy as np
 import math
-from timm.models.layers import to_2tuple
+from timm.layers import to_2tuple
 from timm.models.vision_transformer import PatchEmbed, Mlp
 
 from modules.voxelization import Voxelization
 import modules.functional as F
 from .encoders import PointNetEncoder
-from utils_vit import *
+from .utils_vit import *
 
 
 def modulate(x, shift, scale):
@@ -323,6 +323,10 @@ class DiT(nn.Module):
                      ) for i in range(depth)
         ])
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
+        self.shape_proj = nn.Sequential(
+            nn.Linear(latent_dim, hidden_size),
+            nn.SiLU() # or another activation
+        )
         self.initialize_weights()
 
     def initialize_weights(self):
@@ -357,6 +361,10 @@ class DiT(nn.Module):
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
+        nn.init.xavier_uniform_(self.shape_proj[0].weight)
+        if self.shape_proj[0].bias is not None:
+            nn.init.constant_(self.shape_proj[0].bias, 0)
+
 
     def unpatchify_voxels(self, x0):
         """
@@ -373,7 +381,7 @@ class DiT(nn.Module):
         points = x0.reshape(shape=(x0.shape[0], c, x * p, y * p, z * p))
         return points
 
-    def forward(self, x, t, y):
+    def forward(self, x, t):
         """
         Forward pass of DiT.
         x: (N, C, P) tensor of spatial inputs (point clouds or latent representations of images)
@@ -435,7 +443,6 @@ def get_3d_sincos_pos_embed(embed_dim, grid_size, cls_token=False, extra_tokens=
     return:
     pos_embed: [grid_size*grid_size, embed_dim] or [1+grid_size*grid_size, embed_dim] (w/ or w/o cls_token)
     """
-    print('grid_size:', grid_size)
 
     grid_x = np.arange(grid_size, dtype=np.float32)
     grid_y = np.arange(grid_size, dtype=np.float32)
