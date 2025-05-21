@@ -183,7 +183,7 @@ def main():
         batch = next(train_iter)
         x = batch['pointcloud'].to(args.device)
         x = x.transpose(1, 2)
-        if it == 1 and args.local_rank in [-1, 0]:  # Only log on main process
+        if it == 1 and local_rank in [-1, 0]:  # Only log on main process
             memory_bank.append(x)
             writer.add_mesh('train/pc', x, global_step=it)
         # Reset grad and model state
@@ -313,7 +313,7 @@ def main():
                     score = validate_loss(it)
                     validate_inspect(it)
             # save checkpoint only at the final iteration
-            if it == args.max_iters and args.local_rank in [-1, 0]:  # Only save on main process
+            if it == args.max_iters and local_rank in [-1, 0]:  # Only save on main process
                 opt_states = {
                     'optimizer': optimizer.state_dict(),
                     'scheduler': scheduler.state_dict(),
