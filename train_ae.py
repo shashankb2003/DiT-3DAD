@@ -233,6 +233,7 @@ def main():
                     code = model.encode(ref)
                     recons = model.decode(code, ref.size(1), flexibility=args.flexibility)
                 if args.rel:
+                    ref = ref.transpose(1, 2)
                     recons += ref
             
             all_ref.append(ref * scale + shift)
@@ -284,6 +285,7 @@ def main():
     def validate_inspect(it):
         for i, batch in enumerate(tqdm(val_loader, desc='Inspect')):
             x = batch['pointcloud'].to(args.device)
+            x = x.transpose(1,2)
             model.eval()
             if local_rank != -1:
                 code = model.module.encode(x)
@@ -292,6 +294,7 @@ def main():
                 code = model.encode(x)
                 recons = model.decode(code, x.size(1), flexibility=args.flexibility).detach()
             if args.rel:
+                x= x.transpose(1,2)
                 recons += x
 
             if i >= args.num_inspect_batches:
