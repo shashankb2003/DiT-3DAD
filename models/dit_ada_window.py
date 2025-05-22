@@ -387,14 +387,15 @@ class DiT(nn.Module):
         x: (N, C, P) tensor of spatial inputs (point clouds or latent representations of images)
         t: (N,) tensor of diffusion timesteps
         """
-
+        point_cloud=x
+        x=x.transpose(1,2)
         # Voxelization
         features, coords = x, x
         x_voxelized, voxel_coords = self.voxelization(features, coords)
 
         # Get shape embedding from the input pointcloud (before adding noise)
         # PointCNNEncoder expects [B, N, 3] format
-        shape_embedding, _ = self.y_embedder(x)
+        shape_embedding, _ = self.y_embedder(point_cloud)
         shape_embedding = self.shape_proj(shape_embedding) # Project to hidden_size
         t = self.t_embedder(t)
         c = t + shape_embedding

@@ -182,7 +182,7 @@ def main():
         # Load data
         batch = next(train_iter)
         x = batch['pointcloud'].to(args.device)
-        x = x.transpose(1, 2)
+
         if it == 1 and local_rank in [-1, 0]:  # Only log on main process
             memory_bank.append(x)
             writer.add_mesh('train/pc', x, global_step=it)
@@ -193,7 +193,7 @@ def main():
         # Forward
         if args.rel:
             x_raw = batch['pointcloud_raw'].to(args.device)
-            x_raw = x_raw.transpose(1, 2)
+
             loss = model.module.get_loss(x, x_raw) if local_rank != -1 else model.get_loss(x, x_raw)
         else:
             loss = model.module.get_loss(x) if local_rank != -1 else model.get_loss(x)
@@ -221,7 +221,7 @@ def main():
             if args.num_val_batches > 0 and i >= args.num_val_batches:
                 break
             ref = batch['pointcloud'].to(args.device)
-            ref = ref.transpose(1, 2)
+
             shift = batch['shift'].to(args.device)
             scale = batch['scale'].to(args.device)
             with torch.no_grad():
@@ -233,7 +233,6 @@ def main():
                     code = model.encode(ref)
                     recons = model.decode(code, ref.size(1), flexibility=args.flexibility)
                 if args.rel:
-                    ref = ref.transpose(1, 2)
                     recons += ref
             
             all_ref.append(ref * scale + shift)
@@ -248,20 +247,22 @@ def main():
 
         if local_rank != -1:
             # Gather results from all processes
-            all_ref = [torch.zeros_like(all_ref) for _ in range(dist.get_world_size())]
-            all_recons = [torch.zeros_like(all_recons) for _ in range(dist.get_world_size())]
-            all_label = [torch.zeros_like(all_label) for _ in range(dist.get_world_size())]
-            all_mask = [torch.zeros_like(all_mask) for _ in range(dist.get_world_size())]
             
-            dist.all_gather(all_ref, all_ref)
-            dist.all_gather(all_recons, all_recons)
-            dist.all_gather(all_label, all_label)
-            dist.all_gather(all_mask, all_mask)
-            
-            all_ref = torch.cat(all_ref, dim=0)
-            all_recons = torch.cat(all_recons, dim=0)
-            all_label = torch.cat(all_label, dim=0)
-            all_mask = torch.cat(all_mask, dim=0)
+            gathered_refs = [torch.zeros_like(all_ref) for _ in range(dist.get_world_size())]
+            gathered_recons = [torch.zeros_like(all_recons) for _ in range(dist.get_world_size())]
+            gathered_labels = [torch.zeros_like(all_label) for _ in range(dist.get_world_size())]
+            gathered_masks = [torch.zeros_like(all_mask) for _ in range(dist.get_world_size())]
+            # Gather tensors from all processes
+            dist.all_gather(gathered_refs, all_ref)
+            dist.all_gather(gathered_recons, all_recons)
+            dist.all_gather(gathered_labels, all_label)
+            dist.all_gather(gathered_masks, all_mask)
+
+            # Concatenate the gathered tensors
+            all_ref = torch.cat(gathered_refs, dim=0)
+            all_recons = torch.cat(gathered_recons, dim=0)
+            all_label = torch.cat(gathered_labels, dim=0)
+            all_mask = torch.cat(gathered_masks, dim=0)
 
         metrics = ROC_AP(all_ref, all_recons, all_label, all_mask)
         roc_i, roc_p, ap_i, ap_p = metrics['ROC_i'].item(), metrics['ROC_p'].item(), metrics['AP_i'].item(), metrics['AP_p'].item()
@@ -285,7 +286,6 @@ def main():
     def validate_inspect(it):
         for i, batch in enumerate(tqdm(val_loader, desc='Inspect')):
             x = batch['pointcloud'].to(args.device)
-            x = x.transpose(1,2)
             model.eval()
             if local_rank != -1:
                 code = model.module.encode(x)
@@ -294,7 +294,6 @@ def main():
                 code = model.encode(x)
                 recons = model.decode(code, x.size(1), flexibility=args.flexibility).detach()
             if args.rel:
-                x= x.transpose(1,2)
                 recons += x
 
             if i >= args.num_inspect_batches:
