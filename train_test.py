@@ -24,7 +24,7 @@ def main(args):
         
         for cate in cates:
             # Use torchrun for distributed training
-            cmd = f"torchrun --nproc_per_node={args.nproc_per_node} train_ae.py --category {cate} --log_root logs_{dataset}/{exp_name}_{time_fix}_{args.tag}/ --model_type {args.model_type}" + cfg_cmd
+            cmd = f"torchrun --nproc_per_node={args.nproc_per_node} train_ae.py --category {cate} --log_root $HOME/logs_{dataset}/{exp_name}_{time_fix}_{args.tag}/ --model_type {args.model_type}" + cfg_cmd
             os.system(cmd)
 
 if __name__ == "__main__":
