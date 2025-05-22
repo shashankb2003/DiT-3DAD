@@ -1,14 +1,33 @@
 import argparse
 import os
 import time
+import subprocess
+import sys
 from pathlib import Path
 
 from utils.config import cmd_from_config
 from utils.dataset import all_shapenetad_cates
 
+def check_and_install_knn_cuda():
+    try:
+        import knn_cuda
+        print("KNN_CUDA is already installed.")
+    except ImportError:
+        print("KNN_CUDA not found. Installing...")
+        try:
+            subprocess.check_call([
+                sys.executable, "-m", "pip", "install",
+                "git+https://github.com/unlimblue/KNN_CUDA.git#egg=knn_cuda&subdirectory=."
+            ])
+            print("KNN_CUDA installed successfully.")
+        except subprocess.CalledProcessError as e:
+            print(f"Failed to install KNN_CUDA: {e}")
+            sys.exit(1)
 
 def main(args):
-    # Get local_rank from environment variable
+    # Check and install KNN_CUDA if needed
+    check_and_install_knn_cuda()
+
     local_rank = int(os.environ.get('LOCAL_RANK', -1))
     # Only run on rank 0 to avoid multiple processes running the same training
     if local_rank in [-1, 0]:  # -1 for non-distributed, 0 for distributed
