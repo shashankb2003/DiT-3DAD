@@ -3,8 +3,8 @@ dataset: ShapeNetAD
 dataset_path: ./data/shapenet-ad
 num_points: 2048
 num_aug: 2048
-train_batch_size: 64
-val_batch_size: 64
+train_batch_size: 128
+val_batch_size: 128
 rel: True
 
 # Model parameters
