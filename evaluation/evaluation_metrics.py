@@ -99,6 +99,20 @@ def ROC_AP(all_refs, all_recons, all_labels, all_masks):
     image_preds = (image_preds - np.min(image_preds)) / (np.max(image_preds) - np.min(image_preds))
     pixel_preds = np.array(pixel_preds).flatten()
     pixel_preds = (pixel_preds - np.min(pixel_preds)) / (np.max(pixel_preds) - np.min(pixel_preds))
+        
+    # Safe normalization function
+    def safe_normalize(x):
+        min_val = np.min(x)
+        max_val = np.max(x)
+        if max_val == min_val:
+            return np.zeros_like(x)  # or np.ones_like(x) if you prefer
+        return (x - min_val) / (max_val - min_val)
+
+    # Apply safe normalization
+    image_preds = safe_normalize(image_preds)
+    pixel_preds = safe_normalize(pixel_preds)
+    image_preds_nn = safe_normalize(image_preds_nn)
+    pixel_preds_nn = safe_normalize(pixel_preds_nn)
     
     image_labels = all_labels.cpu().numpy()
     pixel_labels = all_masks.flatten().cpu().numpy()
