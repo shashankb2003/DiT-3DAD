@@ -247,7 +247,7 @@ def main():
 
         if local_rank != -1:
             # Gather results from all processes
-            
+            dist.barrier()
             gathered_refs = [torch.zeros_like(all_ref) for _ in range(dist.get_world_size())]
             gathered_recons = [torch.zeros_like(all_recons) for _ in range(dist.get_world_size())]
             gathered_labels = [torch.zeros_like(all_label) for _ in range(dist.get_world_size())]
