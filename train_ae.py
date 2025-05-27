@@ -133,14 +133,14 @@ def main():
         train_dset,
         batch_size=args.train_batch_size,
         sampler=train_sampler,
-        num_workers=0,
+        num_workers=4,
         pin_memory=True
     )
     val_loader = DataLoader(
         val_dset, 
         batch_size=args.val_batch_size, 
         sampler=val_sampler,
-        num_workers=0,
+        num_workers=4,
         pin_memory=True
     )
     train_iter = get_data_iterator(train_loader)

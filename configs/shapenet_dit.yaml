@@ -4,8 +4,8 @@ dataset_path: ./data/shapenet-ad
 scale_mode: shape_unit
 num_points: 2048
 num_aug: 2048
-train_batch_size: 64
-val_batch_size: 64
+train_batch_size: 16
+val_batch_size: 16
 rotate: False
 rel: True
 
